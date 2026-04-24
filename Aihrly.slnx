@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="Aihrly.Api/Aihrly.Api.csproj" />
+  <Project Path="Aihrly.Tests/Aihrly.Tests.csproj" />
+</Solution>
