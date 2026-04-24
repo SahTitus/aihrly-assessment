@@ -11,7 +11,7 @@ public class ApplicationScore
     public Guid SetById { get; set; }
     public TeamMember SetBy { get; set; } = null!;
     public DateTime SetAt { get; set; }
-    // tracks who last updated it, not just who created it
+    // tracks who last updated it
     public Guid? UpdatedById { get; set; }
     public TeamMember? UpdatedBy { get; set; }
     public DateTime? UpdatedAt { get; set; }

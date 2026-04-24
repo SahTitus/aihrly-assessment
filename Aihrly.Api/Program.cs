@@ -1,14 +1,16 @@
+using System.Text.Json.Serialization;
 using Aihrly.Api.Data;
 using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
 
-builder.Services.AddControllers();
+builder.Services.AddControllers()
+    .AddJsonOptions(o => o.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseNpgsql(builder.Configuration.GetConnectionString("Default")));
 
-// problem+json for all error responses
+// ensure consistent error responses
 builder.Services.AddProblemDetails();
 
 var app = builder.Build();
@@ -16,7 +18,7 @@ var app = builder.Build();
 app.UseExceptionHandler();
 app.UseStatusCodePages();
 
-// run pending migrations on startup so dev setup is one step
+// apply migrations on startup in dev
 if (app.Environment.IsDevelopment())
 {
     using var scope = app.Services.CreateScope();
@@ -28,5 +30,5 @@ app.MapControllers();
 
 app.Run();
 
-// needed so WebApplicationFactory in tests can reference this entry point
+// allow WebApplicationFactory to find Program in tests
 public partial class Program { }
