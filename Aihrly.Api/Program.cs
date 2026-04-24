@@ -1,5 +1,6 @@
 using System.Text.Json.Serialization;
 using Aihrly.Api.Data;
+using Aihrly.Api.Services;
 using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -9,6 +10,10 @@ builder.Services.AddControllers()
 
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseNpgsql(builder.Configuration.GetConnectionString("Default")));
+
+// singleton so the queue lives for the app lifetime
+builder.Services.AddSingleton<NotificationQueue>();
+builder.Services.AddHostedService<NotificationWorker>();
 
 // ensure consistent error responses
 builder.Services.AddProblemDetails();

@@ -12,7 +12,7 @@ namespace Aihrly.Api.Controllers;
 
 [ApiController]
 [Route("api/applications")]
-public class ApplicationsController(AppDbContext db) : ControllerBase
+public class ApplicationsController(AppDbContext db, NotificationQueue notificationQueue) : ControllerBase
 {
     [HttpGet("{id}")]
     public async Task<IActionResult> GetApplication(Guid id)
@@ -108,6 +108,10 @@ public class ApplicationsController(AppDbContext db) : ControllerBase
 
         app.CurrentStage = target;
         await db.SaveChangesAsync();
+
+        // fire and forget, don't block request
+        if (target is ApplicationStage.Hired or ApplicationStage.Rejected)
+            notificationQueue.Enqueue(new NotificationJob(app.Id, target.ToString()));
 
         return Ok(new { currentStage = app.CurrentStage.ToString() });
     }

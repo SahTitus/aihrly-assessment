@@ -15,7 +15,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
-        // store enums as strings so the DB is readable without code context
+        // store enums as strings for readability
         modelBuilder.Entity<TeamMember>().Property(t => t.Role).HasConversion<string>();
         modelBuilder.Entity<Job>().Property(j => j.Status).HasConversion<string>();
         modelBuilder.Entity<Application>().Property(a => a.CurrentStage).HasConversion<string>();
@@ -24,22 +24,22 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
         modelBuilder.Entity<StageHistory>().Property(s => s.FromStage).HasConversion<string>();
         modelBuilder.Entity<StageHistory>().Property(s => s.ToStage).HasConversion<string>();
 
-        // one row per dimension per application -- PUT semantics
+        // one score per dimension per application
         modelBuilder.Entity<ApplicationScore>()
             .HasIndex(s => new { s.ApplicationId, s.Dimension })
             .IsUnique();
 
-        // prevent duplicate applications from the same candidate
+        // prevent duplicate applications
         modelBuilder.Entity<Application>()
             .HasIndex(a => new { a.JobId, a.CandidateEmail })
             .IsUnique();
 
-        // these indexes back the queries we run most often
+        // indexes for common lookups
         modelBuilder.Entity<ApplicationNote>().HasIndex(n => n.ApplicationId);
         modelBuilder.Entity<StageHistory>().HasIndex(s => s.ApplicationId);
         modelBuilder.Entity<ApplicationScore>().HasIndex(s => s.ApplicationId);
 
-        // restrict instead of cascade so we never silently delete audit data
+        // keep audit data, no cascade deletes
         modelBuilder.Entity<ApplicationNote>()
             .HasOne(n => n.CreatedBy).WithMany().OnDelete(DeleteBehavior.Restrict);
 
@@ -57,7 +57,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
 
     private static void SeedTeamMembers(ModelBuilder modelBuilder)
     {
-        // fixed GUIDs so the README can reference them and tests can rely on them
+        // fixed ids for tests and docs
         modelBuilder.Entity<TeamMember>().HasData(
             new TeamMember
             {
