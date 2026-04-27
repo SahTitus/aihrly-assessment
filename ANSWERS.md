@@ -1,67 +1,98 @@
-﻿# ANSWERS.md
+# ANSWERS
 
-## Question 1 -- Schema design
+## 1. Schema
 
-**Tables (plain-text sketch):**
+```text
+applications
+- id uuid pk
+- job_id uuid not null fk jobs(id)
+- candidate_name varchar(200) not null
+- candidate_email varchar(200) not null
+- cover_letter text null
+- current_stage text not null
+- created_at timestamptz not null
 
+application_notes
+- id uuid pk
+- application_id uuid not null fk applications(id)
+- type text not null
+- description text not null
+- created_by_id uuid not null fk team_members(id)
+- created_at timestamptz not null
+
+stage_history
+- id uuid pk
+- application_id uuid not null fk applications(id)
+- from_stage text not null
+- to_stage text not null
+- changed_by_id uuid not null fk team_members(id)
+- changed_at timestamptz not null
+- reason text null
+
+application_scores
+- id uuid pk
+- application_id uuid not null fk applications(id)
+- dimension text not null
+- score int not null
+- comment text null
+- set_by_id uuid not null fk team_members(id)
+- set_at timestamptz not null
+- updated_by_id uuid null fk team_members(id)
+- updated_at timestamptz null
 ```
-Applications       (Id, JobId FK, CandidateName, CandidateEmail, CoverLetter, CurrentStage, CreatedAt)
-ApplicationNotes   (Id, ApplicationId FK, Type, Description, CreatedById FK, CreatedAt)
-StageHistory       (Id, ApplicationId FK, FromStage, ToStage, ChangedById FK, ChangedAt, Reason)
-ApplicationScores  (Id, ApplicationId FK, Dimension, Score, Comment, SetById FK, SetAt, UpdatedById FK?, UpdatedAt?)
-```
 
-**Indexes and why:**
+Indexes:
 
-- Unique `(JobId, CandidateEmail)` on `Applications` -- enforces the one-application-per-job rule at the DB level so no application code can accidentally allow duplicates.
-- Non-unique index on `ApplicationId` in `ApplicationNotes`, `StageHistory`, and `ApplicationScores` -- every read of the full profile filters all three of these tables by application ID; without this index each would be a sequential scan.
-- Unique `(ApplicationId, Dimension)` on `ApplicationScores` -- one score row per dimension per application; the DB rejects a second INSERT so the upsert logic does an UPDATE instead.
+- `applications(job_id, candidate_email)` unique. This enforces the duplicate-application rule.
+- `application_notes(application_id)`. This supports `GET /api/applications/{id}` and `GET /api/applications/{id}/notes`.
+- `stage_history(application_id)`. This supports `GET /api/applications/{id}`.
+- `application_scores(application_id)`. This supports `GET /api/applications/{id}`.
+- `application_scores(application_id, dimension)` unique. This enforces one current score per dimension per application.
 
-**`GET /api/applications/{id}` -- query and round-trips:**
+For `GET /api/applications/{id}`, the current code does one EF Core query that loads:
 
-One round-trip. EF Core's `.Include()` chain generates a single SELECT with LEFT JOINs across all four child tables, plus a join to `Jobs` for the title and a join to `TeamMembers` for each author/reviewer column. It returns all needed data in one database call.
+- the application row
+- the related job
+- notes with note authors
+- stage history with the team member who changed each stage
+- scores with `set_by` and `updated_by`
 
----
+The SQL shape is a single `SELECT` from `applications` with joins to `jobs`, `application_notes`, `team_members`, `stage_history`, and `application_scores`. In the current implementation that is one database round-trip.
 
-## Question 2 -- Scoring design
+## 2. Scoring design trade-off
 
-**(a) Why three separate endpoints vs one generic endpoint, and when would the opposite be true?**
+### 2a
 
-Three separate endpoints (`/scores/culture-fit`, `/scores/interview`, `/scores/assessment`) make the contract explicit -- a client knows exactly what it is submitting from the URL alone, and you can add per-dimension validation rules or different required fields later without touching the other two. HTTP-level caching and rate limiting are also easier to apply per-endpoint.
+Three separate endpoints are better here because the score dimensions are fixed and named in the prompt. The routes are explicit, the request body stays small, and each dimension can get its own rules later without making one generic endpoint harder to validate.
 
-The generic approach (`PUT /scores` with a `"dimension"` field in the body) would be better if the set of dimensions was dynamic or configurable per-organisation -- hardcoding three routes only works when the dimensions are fixed and known at build time.
+One generic `PUT /api/applications/{id}/scores` would be better if the client usually saves all scores together or if the score dimensions can change over time. In that case one endpoint reduces request count and keeps the route surface smaller.
 
-**(b) If the product team wanted full score change history, how would the schema change? Would the endpoints change?**
+### 2b
 
-Schema change: add a `ScoreHistory` table with columns `(Id, ApplicationScoreId FK, OldScore, NewScore, ChangedById FK, ChangedAt)`. Every time a PUT overwrites an existing score, insert a row into `ScoreHistory` before applying the update. The `ApplicationScores` table stays as-is -- it still holds the current value.
+I would keep `application_scores` as the current-state table and add `application_score_history` as an append-only table. That history table would have `id`, `application_id`, `dimension`, `score`, `comment`, `changed_by_id`, and `changed_at`.
 
-Endpoint change: the three PUT endpoints keep the same signatures; the history write is an internal side-effect, invisible to the caller. You would add a new `GET /api/applications/{id}/scores/{dimension}/history` endpoint to expose the log, but the write side does not need to change.
+The three write endpoints can stay the same. Each write would insert one history row and then upsert the current row in `application_scores`. I would only add a read endpoint for score history if the product needed to show that timeline.
 
----
+## 3. Debugging question
 
-## Question 3 -- Debugging a missing stage transition
+- Get the application id, recruiter name, and approximate time of the change.
+- In the browser, inspect the `PATCH /api/applications/{id}/stage` request from yesterday and confirm the payload, response status, response body, and `X-Team-Member-Id`.
+- Check API logs for that request and confirm whether the server returned `200`, `400`, `401`, or `500`.
+- Query `stage_history` for that application ordered by `changed_at` and see whether an `Interview` row was written.
+- Query `applications.current_stage` for the same application and compare it with the latest `stage_history.to_stage`.
+- If there is no `Interview` history row, focus on why the request was rejected or never reached the API.
+- If `stage_history` says `Interview` but `applications.current_stage` says `Screening`, inspect the stage update code path and transaction behavior.
+- If both database values say `Interview` but the recruiter still sees `Screening`, check whether the browser hit the wrong environment or showed stale data.
+- Check whether another valid stage change happened after the recruiter moved the candidate.
 
-A recruiter says: "I moved a candidate to Interview yesterday and today the system says they are still in Screening."
+## 4. Honest self-assessment
 
-- **Check `StageHistory` directly.** Query the DB for all rows where `ApplicationId` matches. If a `Screening -> Interview` row exists, the transition did persist -- the bug is in what is being displayed, not in the write path.
-- **If no `StageHistory` row exists,** the PATCH never completed successfully. Check the API logs for a `PATCH /api/applications/{id}/stage` request around the reported time -- look at the HTTP status code returned.
-- **If the log shows a 400,** the transition was rejected. The most likely cause: the application was not actually in `Screening` at that moment (maybe another team member had already moved it, or it was in a different stage than the recruiter thought).
-- **If the log shows a 200 but no DB row,** there is a bug in the write logic -- either `SaveChangesAsync()` was not called, an exception was swallowed, or the request hit the wrong environment/instance.
-- **If there is no log entry at all,** the request never reached the server. Open the browser network tab, reproduce the action, and check whether the request was actually sent and what response came back.
-- **Check `CurrentStage` on the `Applications` row.** It should always match the `ToStage` of the most recent `StageHistory` entry. If they differ, there is an atomicity bug -- the history row was written but the application row was not updated in the same transaction.
-- **Check for a concurrent PATCH.** If two team members acted on the same application around the same time, one could have overwritten the other. `StageHistory` would show both transitions in sequence.
-- **Try to reproduce manually.** Use Postman or curl to send the exact same PATCH against a test application in the same stage. If it works, the original failure was a one-off (network drop, browser tab closed mid-request, etc.).
+`C#`: 3/5. Comfortable building small APIs, DTOs, and tests. Still building depth on framework internals.
 
----
+`SQL`: 3/5. Comfortable with schema design, constraints, joins, and indexes. Less experienced with deeper performance tuning.
 
-## Question 4 -- Honest self-assessment
+`Git`: 3/5. Comfortable with normal branch, commit, and PR flow. Less confident when history cleanup gets messy.
 
-**C#: 2/5** -- I can read and write working C# and understand async/await, but I am still learning the deeper parts of the language and the .NET ecosystem.
+`REST API design`: 3/5. Comfortable with routes, validation, status codes, and DTO boundaries. Still learning longer-term API trade-offs.
 
-**SQL: 3/5** -- Comfortable with schema design, joins, indexes, and writing queries by hand; less experienced with query optimisation and reading execution plans.
-
-**Git: 2/5** -- I use commits, branches, and push/pull confidently but do not have much experience with rebasing, resolving complex merge conflicts, or advanced history tools.
-
-**REST API design: 3/5** -- I understand resource-oriented routes, correct verb usage, and standard status codes; I would need more practice on versioning strategies and edge-case error handling.
-
-**Writing tests: 2/5** -- I wrote the required tests and they pass, but my coverage is thin and I am still learning how to design tests that are genuinely meaningful rather than just exercising happy paths.
+`Writing tests`: 3/5. Comfortable covering core behavior with unit and integration tests. I still want more reps on edge cases and broader failure coverage.

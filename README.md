@@ -1,128 +1,78 @@
-﻿# Aihrly ATS - Backend Assessment
+# Aihrly ATS API
 
-ASP.NET Core 10 Web API backed by PostgreSQL 17. Models a minimal recruiting pipeline: jobs, applications, stage transitions, notes, scores, and async notifications.
+ASP.NET Core Web API for jobs, applications, notes, scores, stage history, and async notifications.
 
----
+## Stack
 
-## Prerequisites
+- .NET 9
+- ASP.NET Core Web API
+- PostgreSQL with EF Core and Npgsql
+- xUnit
 
-- [.NET 10 SDK](https://dotnet.microsoft.com/download)
-- PostgreSQL 17 running locally on the default port (5432)
-- `dotnet-ef` tool (`dotnet tool install -g dotnet-ef`)
+## Run locally
 
----
+Create the databases:
 
-## Running locally
+```sql
+CREATE DATABASE aihrly;
+CREATE DATABASE aihrly_test;
+```
 
-1. **Create the database** (if it does not already exist):
+Create `Aihrly.Api/appsettings.Development.json`:
 
-   ```sql
-   CREATE DATABASE aihrly;
-   ```
+```json
+{
+  "ConnectionStrings": {
+    "Default": "Host=localhost;Database=aihrly;Username=postgres;Password=postgres"
+  }
+}
+```
 
-2. **Set your database password.**
-   Create `Aihrly.Api/appsettings.Development.json` (git-ignored) with your real credentials:
+Apply migrations:
 
-   ```json
-   {
-     "ConnectionStrings": {
-       "Default": "Host=localhost;Database=aihrly;Username=postgres;Password=YOUR_PASSWORD"
-     }
-   }
-   ```
+```bash
+dotnet ef database update --project Aihrly.Api --startup-project Aihrly.Api
+```
 
-3. **Apply migrations and start the API:**
-   ```bash
-   cd Aihrly.Api
-   dotnet run
-   ```
-   Migrations run automatically on startup when the environment is `Development`.
+Start the API:
 
-The API is available at `https://localhost:7xxx` / `http://localhost:5xxx` (ports printed on startup).
+```bash
+dotnet run --project Aihrly.Api
+```
 
----
+In `Development`, the API also applies migrations on startup.
+
+## Run tests
+
+```bash
+dotnet test
+```
+
+Tests use the `aihrly_test` database from `Aihrly.Tests/ApiFactory.cs`.
 
 ## Seeded team members
 
-Three team members are seeded automatically via the migration. Use their IDs in the `X-Team-Member-Id` header for any write operation that requires reviewer identity.
+Use these IDs in `X-Team-Member-Id` on note, score, and stage change requests.
 
-| Name          | ID                                     | Role           |
-| ------------- | -------------------------------------- | -------------- |
-| Alice Johnson | `a1b2c3d4-0001-0000-0000-000000000000` | Recruiter      |
-| Bob Smith     | `a1b2c3d4-0002-0000-0000-000000000000` | Hiring Manager |
-| Carol Lee     | `a1b2c3d4-0003-0000-0000-000000000000` | Interviewer    |
-
----
-
-## API overview
-
-| Method  | Route                                            | Purpose                                             |
-| ------- | ------------------------------------------------ | --------------------------------------------------- |
-| `POST`  | `/api/jobs`                                      | Create a job                                        |
-| `GET`   | `/api/jobs`                                      | List jobs (filterable by `status`, paginated)       |
-| `GET`   | `/api/jobs/{id}`                                 | Get a single job                                    |
-| `POST`  | `/api/jobs/{jobId}/applications`                 | Submit an application                               |
-| `GET`   | `/api/jobs/{jobId}/applications`                 | List applications for a job (filterable by `stage`) |
-| `GET`   | `/api/applications/{id}`                         | Full candidate profile                              |
-| `PATCH` | `/api/applications/{id}/stage`                   | Advance or reject an application                    |
-| `POST`  | `/api/applications/{id}/notes`                   | Add a note                                          |
-| `GET`   | `/api/applications/{id}/notes`                   | List notes                                          |
-| `PUT`   | `/api/applications/{id}/scores/culture-fit`      | Upsert culture-fit score                            |
-| `PUT`   | `/api/applications/{id}/scores/technical-skills` | Upsert technical-skills score                       |
-| `PUT`   | `/api/applications/{id}/scores/communication`    | Upsert communication score                          |
-
-### Headers required on reviewer actions
-
-```
-X-Team-Member-Id: <team-member-guid>
-```
-
-Required on: `PATCH /stage`, `POST /notes`, all three score `PUT` endpoints.
-
----
-
-## Part 2 - Background notifications (Option A)
-
-When an application moves to `Hired` or `Rejected`, a `NotificationJob` is pushed onto an in-process `Channel<T>` queue. A singleton `BackgroundService` (`NotificationWorker`) drains the channel, creates a scoped `AppDbContext`, logs the send, and writes a row to the `Notifications` table.
-
-No external infrastructure (Redis, RabbitMQ, Hangfire) is required. The trade-off is that queued jobs are lost if the process crashes; for production this would be replaced with durable storage.
-
----
-
-## Running the tests
-
-The integration tests connect to a separate `aihrly_test` database. The database is created automatically when EF Core migrations run on first launch of the test server.
-
-```bash
-cd Aihrly.Tests
-dotnet test
-```
-
-Or from the solution root:
-
-```bash
-dotnet test
-```
-
-You do **not** need to create `aihrly_test` manually - EF Core handles it.
-
----
+| Name | ID | Role |
+| --- | --- | --- |
+| Alice Johnson | `a1b2c3d4-0001-0000-0000-000000000000` | Recruiter |
+| Bob Martinez | `a1b2c3d4-0002-0000-0000-000000000000` | HiringManager |
+| Carol Chen | `a1b2c3d4-0003-0000-0000-000000000000` | Recruiter |
 
 ## Assumptions
 
-- Authentication is out of scope; reviewer identity is passed via a plain HTTP header.
-- The three score dimensions (CultureFit, TechnicalSkills, Communication) are modelled as separate `PUT` endpoints that upsert. A reviewer can only hold one value per dimension per application.
-- Stage transitions follow a strictly linear pipeline; skipping stages and re-opening terminal states (`Hired`, `Rejected`) are both rejected with `400`.
-- Duplicate applications are identified by `(job, candidate email)` and rejected with `409`.
-- Pagination defaults to `page=1, pageSize=20`.
+- Missing, invalid, or unknown `X-Team-Member-Id` returns `401`.
+- Candidate email is lowercased before save, and `(job_id, candidate_email)` is unique.
+- Scores store the current value only. A second `PUT` overwrites the previous value.
+- `Hired` and `Rejected` are terminal stages.
 
----
+## Part 2 choice
+
+I picked Option A. When an application moves to `Hired` or `Rejected`, the API saves the stage change, enqueues a notification job, and returns the HTTP response without waiting for the notification work. A hosted background service reads that queue, writes a log line, and inserts a row into `notifications`. I used an in-memory queue because it keeps the take-home small and keeps the request path simple. The trade-off is that queued notifications would be lost if the process stops before the worker handles them.
 
 ## What I would improve with more time
 
-- Replace the in-process notification queue with Hangfire + PostgreSQL persistence so queued jobs survive restarts.
-- Add real authentication (JWT or API key) rather than a trusted header.
-- Expand test coverage: per-stage filter tests, invalid enum values in PATCH body, score boundary validation.
-- Add `GET /api/applications` (search across all jobs).
-- Soft-delete jobs instead of hard-delete, to preserve historical application data.
-
+- Add more integration tests around invalid headers and invalid stage changes.
+- Replace the in-memory notification queue with durable storage.
+- Add Docker setup for API and Postgres.

@@ -484,3 +484,6 @@ $RECYCLE.BIN/
 .history
 # local dev connection strings
 appsettings.Development.json
+
+# Local .NET SDK state created in the repo root
+.dotnet/
